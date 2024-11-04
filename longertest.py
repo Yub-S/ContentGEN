@@ -129,9 +129,61 @@ def get_youtube_transcript(url):
         st.error(f"Error getting transcript: {str(e)}")
         return None
 
-def analyze_transcript_with_aria(transcript, content_type, duration_request, custom_prompt=None):
-    """Analyze transcript using Aria AI with modified prompt based on content type."""
+def split_transcript_by_duration(transcript, chunk_minutes=60):
+    """Split transcript into chunks of specified duration."""
+    chunks = []
+    current_chunk = []
+    current_minutes = 0
+    
+    for line in transcript.split('\n'):
+        # Extract timestamp [MM:SS]
+        match = re.match(r'\[(\d{2}):(\d{2})\]', line)
+        if match:
+            minutes, seconds = map(int, match.groups())
+            timestamp_minutes = minutes
+            
+            # If we've exceeded our chunk duration, start a new chunk
+            if timestamp_minutes >= (len(chunks) + 1) * chunk_minutes:
+                if current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+            
+            current_chunk.append(line)
+    
+    # Add the last chunk if it's not empty
+    if current_chunk:
+        chunks.append('\n'.join(current_chunk))
+    
+    return chunks
+
+def merge_segment_responses(responses):
+    """Merge multiple segment responses into a single response."""
     try:
+        all_segments = []
+        
+        for response in responses:
+            # Parse each response
+            cleaned_response = re.search(r'\{[\s\S]*\}', response).group()
+            response_data = json.loads(cleaned_response)
+            all_segments.extend(response_data['segments'])
+        
+        # Sort segments by start time
+        all_segments.sort(key=lambda x: int(x['start_time'].split(':')[0]) * 60 + int(x['start_time'].split(':')[1]))
+        
+        # Create merged response
+        merged_response = {
+            "segments": all_segments
+        }
+        
+        return json.dumps(merged_response, indent=2)
+    except Exception as e:
+        st.error(f"Error merging segment responses: {str(e)}")
+        return None
+
+def analyze_transcript_with_aria(transcript, content_type, duration_request, custom_prompt=None):
+    """Analyze transcript using Aria AI with support for long videos."""
+    try:
+        # Common prompt construction moved outside if-else
         prompt_map = {
             'EDUCATIONAL': "Extract complete educational segments that fully explain a single concept",
             'KEY_MOMENTS': "Identify complete pivotal conversations or revelations",
@@ -140,10 +192,9 @@ def analyze_transcript_with_aria(transcript, content_type, duration_request, cus
             'CUSTOM': custom_prompt
         }
         
-        # Select the appropriate prompt
         selected_prompt = prompt_map.get(content_type, custom_prompt)
-
-        # Define duration guidance based on duration_request
+        
+        # Duration guidance
         if duration_request == 60:
             duration_guidance = """
             Duration and Precision Requirements:
@@ -162,8 +213,8 @@ def analyze_transcript_with_aria(transcript, content_type, duration_request, cus
             - End exactly when the point is fully made
             - Remove tangents or side discussions
             """
-
-        # Create the enhanced prompt for Aria
+        
+        # Base prompt template
         enhanced_prompt = f"""You are a precision content curator specializing in extracting complete but focused segments from long-form conversations. Analyze this transcript to find self-contained, meaningful segments that are complete yet concise.
 
         CORE OBJECTIVE: {selected_prompt}
@@ -197,8 +248,7 @@ def analyze_transcript_with_aria(transcript, content_type, duration_request, cus
            - Remove interesting but non-essential tangents
 
         Generate a maximum of 8 clips that meet ALL above criteria.
-
-        - If user requests a single clip, select the MOST relevant complete segment that precisely matches their request.
+        If user requests a single clip, select the MOST relevant complete segment that precisely matches their request.
 
         Provide your response in this EXACT format:
         {{
@@ -212,24 +262,56 @@ def analyze_transcript_with_aria(transcript, content_type, duration_request, cus
               }}
           ]
         }}
-
-        Transcript:
-        {transcript}
         """
 
-        # Call Aria API for chat completion
-        response = client.chat.completions.create(
-            model="aria",
-            messages=[{"role": "user", "content": enhanced_prompt}],
-            stop=["<|im_end|>"],
-            stream=False,
-            temperature=0.6,
-            max_tokens=1024,
-            top_p=1
-        )
-
-        # Return the response content
-        return response.choices[0].message.content
+        # Split transcript into 60-minute chunks
+        transcript_chunks = split_transcript_by_duration(transcript)
+        
+        # If only one chunk, process normally
+        if len(transcript_chunks) <= 1:
+            final_prompt = enhanced_prompt + f"\nTranscript:\n{transcript}"
+            response = client.chat.completions.create(
+                model="aria",
+                messages=[{"role": "user", "content": final_prompt}],
+                stop=["<|im_end|>"],
+                stream=False,
+                temperature=0.6,
+                max_tokens=1024,
+                top_p=1
+            )
+            return response.choices[0].message.content
+        
+        else:
+            # Process each chunk separately
+            responses = []
+            
+            for i, chunk in enumerate(transcript_chunks):
+                # Modify prompt for chunk processing
+                chunk_prompt = f"""You are analyzing part {i+1} of {len(transcript_chunks)} from a longer video. 
+                Focus on finding the best segments within this portion (Minutes {i*60}-{(i+1)*60}).
+                
+                {enhanced_prompt}
+                
+                Transcript Chunk {i+1}:
+                {chunk}
+                """
+                
+                # Process chunk
+                chunk_response = client.chat.completions.create(
+                    model="aria",
+                    messages=[{"role": "user", "content": chunk_prompt}],
+                    stop=["<|im_end|>"],
+                    stream=False,
+                    temperature=0.6,
+                    max_tokens=1024,
+                    top_p=1
+                )
+                
+                responses.append(chunk_response.choices[0].message.content)
+            
+            # Merge responses from all chunks
+            merged_response = merge_segment_responses(responses)
+            return merged_response
 
     except Exception as e:
         st.error(f"Error analyzing transcript: {str(e)}")
