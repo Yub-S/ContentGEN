@@ -236,7 +236,7 @@ def analyze_transcript_with_aria(transcript, content_type, duration_request, cus
         return None
 
 def parse_segments_response(response_text):
-    """Parse the structured response from Gemini."""
+    """Parse the structured response from aria"""
     try:
         cleaned_response = re.search(r'\{[\s\S]*\}', response_text).group()
         response_data = json.loads(cleaned_response)

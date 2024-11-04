@@ -11,6 +11,10 @@ from yt_dlp import YoutubeDL
 import tempfile
 import pathlib
 import ffmpeg
+from typing import Optional, Dict
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, TooManyRequests
+import random
+
 
 # Load environment variables
 load_dotenv()
@@ -101,33 +105,106 @@ def sanitize_filename(filename):
     filename = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode()
     return filename[:200]
 
-def get_video_id(url):
+def get_video_id(url: str) -> str:
     """Extract video ID from YouTube URL."""
     if 'youtu.be' in url:
         return url.split('/')[-1].split('?')[0]
     elif 'youtube.com' in url:
-        return re.search(r'v=([^&]+)', url).group(1)
-    return url
+        match = re.search(r'v=([^&]+)', url)
+        if match:
+            return match.group(1)
+    raise ValueError("Invalid YouTube URL format")
 
-def get_youtube_transcript(url):
-    """Get transcript from YouTube video."""
-    try:
-        video_id = get_video_id(url)
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-        
-        formatted_transcript = []
-        for entry in transcript_list:
-            start_time = int(entry['start'])
-            text = entry['text']
-            minutes = start_time // 60
-            seconds = start_time % 60
-            timestamp = f"{minutes:02d}:{seconds:02d}"
-            formatted_transcript.append(f"[{timestamp}] {text}")
-        
-        return "\n".join(formatted_transcript)
-    except Exception as e:
-        st.error(f"Error getting transcript: {str(e)}")
-        return None
+def get_youtube_transcript(url: str, 
+                         max_retries: int = 10,           # Increased max retries
+                         initial_delay: float = 1.0,      # Start with 1 second delay
+                         max_delay: float = 32.0,         # Maximum delay between retries
+                         exponential_base: float = 2.0    # Double the delay after each retry
+                         ) -> Optional[str]:
+    """
+    Get transcript from YouTube video with exponential backoff retry mechanism.
+    
+    Args:
+        url: YouTube video URL
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay between retries in seconds
+        max_delay: Maximum delay between retries in seconds
+        exponential_base: Base for exponential backoff calculation
+    
+    Returns:
+        Formatted transcript string or None if unsuccessful
+    """
+    video_id = get_video_id(url)
+    current_delay = initial_delay
+    attempt = 0
+    
+    while attempt < max_retries:
+        try:
+            # Show retry attempt in UI
+            if attempt > 0:
+                retry_message = st.empty()
+                retry_message.info(f"Retry attempt {attempt + 1}/{max_retries} (waiting {current_delay:.1f}s)")
+            
+            # Get transcript
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+            
+            # Clear retry message if success
+            if attempt > 0:
+                retry_message.empty()
+            
+            # Format transcript
+            formatted_transcript = []
+            for entry in transcript_list:
+                start_time = int(entry['start'])
+                text = entry['text']
+                minutes = start_time // 60
+                seconds = start_time % 60
+                timestamp = f"{minutes:02d}:{seconds:02d}"
+                formatted_transcript.append(f"[{timestamp}] {text}")
+            
+            return "\n".join(formatted_transcript)
+            
+        except TooManyRequests:
+            # For rate limit errors, always retry with backoff
+            attempt += 1
+            if attempt < max_retries:
+                # Add some random jitter to prevent all users retrying at exact same time
+                jitter = random.uniform(0, 0.1 * current_delay)  # 10% jitter
+                sleep_time = current_delay + jitter
+                
+                time.sleep(sleep_time)
+                
+                # Increase delay exponentially, but don't exceed max_delay
+                current_delay = min(current_delay * exponential_base, max_delay)
+                continue
+            else:
+                st.error("Rate limit exceeded. Please try again later.")
+                return None
+            
+        except TranscriptsDisabled:
+            st.error("Transcripts are disabled for this video.")
+            return None
+            
+        except NoTranscriptFound:
+            st.error("No transcript found for this video.")
+            return None
+            
+        except ValueError as e:
+            st.error(f"Invalid URL format: {str(e)}")
+            return None
+            
+        except Exception as e:
+            # For other errors, increment attempt and retry with backoff
+            attempt += 1
+            if attempt < max_retries:
+                time.sleep(current_delay)
+                current_delay = min(current_delay * exponential_base, max_delay)
+                continue
+            else:
+                st.error(f"Failed to fetch transcript after {max_retries} attempts. Error: {str(e)}")
+                return None
+    
+    return None
 
 def split_transcript_by_duration(transcript, chunk_minutes=60):
     """Split transcript into chunks of specified duration."""
