@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #000000;
+  color: #FFFFFF;
+}
+
+.gradient-text {
+  @apply bg-clip-text text-transparent bg-gradient-to-r from-gold to-gold-light;
+}
+
+.glass-card {
+  @apply bg-black/50 backdrop-blur border border-gold/10 rounded-2xl;
+}
+
+::selection {
+  @apply bg-gold/30 text-white;
+}
